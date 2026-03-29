@@ -8,8 +8,11 @@ import json, os, re, time, random
 from pathlib import Path
 from tqdm import tqdm
 import anthropic
+from dotenv import load_dotenv
 
-MODEL = "claude-haiku-4-5"
+load_dotenv(Path(__file__).parent.parent / ".env")
+
+MODEL = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5")
 DELAY = 0.3
 
 CITIES_RU = [
