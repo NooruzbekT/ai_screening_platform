@@ -1,0 +1,47 @@
+# Секреты и инструкции
+.env
+CLAUDE.md
+
+# Claude Code
+.claude/
+
+# Виртуальное окружение
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.Python
+
+# Обученные модели — загружать отдельно
+backend/models_trained/*.pkl
+
+# TTS аудио кэш
+backend/audio_cache/
+
+# Датасеты и разметка — тяжёлые файлы
+training/training_set_rel3.tsv
+training/en_labeled.json
+training/ru_labeled.json
+training/kz_labeled.json
+
+# БД
+*.db
+*.sqlite3
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
