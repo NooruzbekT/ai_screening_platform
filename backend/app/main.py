@@ -37,6 +37,5 @@ def health() -> dict:
     return {"status": "ok"}
 
 
-# Routes are registered here after Day 2 implementation
-# from app.api.routes import router
-# app.include_router(router, prefix="/api")
+from app.api.routes import router
+app.include_router(router, prefix="/api")

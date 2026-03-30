@@ -4,9 +4,12 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+import torch
+import torch.nn as nn
 from langdetect import LangDetectException, detect
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
+from transformers import AutoModel, AutoTokenizer
 
 from app.core.config import settings
 
@@ -31,6 +34,39 @@ QUESTION_MULTIPLIERS: Dict[str, Dict[str, float]] = {
 }
 
 QUALITIES: List[str] = list(QUALITY_WEIGHTS.keys())
+
+
+class _QualityRegressor(nn.Module):
+    """Mirrors the architecture used in Colab training."""
+
+    def __init__(self, model_name: str, hidden: int = 768, num_outputs: int = 7) -> None:
+        super().__init__()
+        self.bert = AutoModel.from_pretrained(model_name)
+        self.head = nn.Sequential(
+            nn.Linear(hidden, 256),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(256, num_outputs),
+        )
+
+    def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+        out = self.bert(input_ids=input_ids, attention_mask=attention_mask)
+        return self.head(out.pooler_output)
+
+
+class _CPUUnpickler(pickle.Unpickler):
+    """Remaps CUDA tensors to CPU when unpickling."""
+    def find_class(self, module, name):
+        if module == "torch.storage" and name == "_load_from_bytes":
+            import io
+            return lambda b: torch.load(io.BytesIO(b), map_location="cpu", weights_only=False)
+        return super().find_class(module, name)
+
+
+def _load_pkl_or_torch(path: Path) -> dict:
+    """Load pkl file regardless of whether tensors were saved on CUDA."""
+    with open(path, "rb") as f:
+        return _CPUUnpickler(f).load()
 
 
 def _load_keywords() -> Dict[str, Dict[str, List[str]]]:
@@ -89,15 +125,47 @@ class NLPModel:
         self._ready = True
 
     def _load_pkl_models(self) -> None:
+        import logging
+        _log = logging.getLogger(__name__)
         for lang, path_str in [
             ("en", settings.NLP_MODEL_EN),
             ("ru", settings.NLP_MODEL_RU),
             ("kz", settings.NLP_MODEL_KZ),
         ]:
             path = Path(path_str)
-            if path.exists():
-                with open(path, "rb") as f:
-                    self._pkl_models[lang] = pickle.load(f)
+            if not path.exists():
+                continue
+            try:
+                data = _load_pkl_or_torch(path)
+                model_type = data.get("model_type", "finetune")
+                quality_keys = data.get("quality_keys", QUALITIES)
+
+                if model_type == "finetune":
+                    # PyTorch fine-tuned transformer
+                    model_name = data["model_name"]
+                    cfg = data.get("model_config", {})
+                    hidden = cfg.get("hidden", 768)
+                    num_outputs = cfg.get("num_outputs", 7)
+                    net = _QualityRegressor(model_name, hidden, num_outputs)
+                    net.load_state_dict(data["model"])
+                    net.eval()
+                    self._pkl_models[lang] = {
+                        "type": "finetune",
+                        "net": net,
+                        "tokenizer": data["tokenizer"],
+                        "quality_keys": quality_keys,
+                    }
+                else:
+                    # sklearn pipeline over SentenceTransformer embeddings
+                    self._pkl_models[lang] = {
+                        "type": "sklearn",
+                        "st_model": data["st_model"],
+                        "scaler": data.get("scaler"),
+                        "classifier": data["classifier"],
+                        "quality_keys": quality_keys,
+                    }
+            except Exception as exc:
+                _log.warning("Failed to load pkl for %s: %s", lang, exc)
 
     def _precompute_kw_embeddings(self) -> None:
         assert self._fallback is not None
@@ -143,21 +211,58 @@ class NLPModel:
     def _score_pkl(
         self, text: str, lang: str
     ) -> Tuple[Dict[str, float], Dict[str, List[str]]]:
-        assert self._fallback is not None
         clf_data = self._pkl_models[lang]
-        model = clf_data["model"]
-        vectorizer = clf_data.get("vectorizer")
+        quality_keys: List[str] = clf_data["quality_keys"]
 
-        features = vectorizer.transform([text]) if vectorizer else \
-            self._fallback.encode([text], convert_to_numpy=True)
+        if clf_data["type"] == "finetune":
+            scores_raw = self._infer_finetune(text, clf_data)
+        else:
+            scores_raw = self._infer_sklearn(text, clf_data)
 
-        proba = model.predict_proba(features)[0]
-        raw_scores = {q: float(proba[i]) if i < len(proba) else 0.5
-                      for i, q in enumerate(QUALITIES)}
+        raw_scores = {q: float(scores_raw[i]) if i < len(scores_raw) else 0.5
+                      for i, q in enumerate(quality_keys)}
+        for q in QUALITIES:
+            if q not in raw_scores:
+                raw_scores[q] = 0.5
 
         kw_lang = lang if lang in self._keywords else "ru"
         attribution = self._keyword_attribution(text, kw_lang)
         return raw_scores, attribution
+
+    def _infer_finetune(self, text: str, clf_data: dict) -> list:
+        net: _QualityRegressor = clf_data["net"]
+        tokenizer = clf_data["tokenizer"]
+        enc = tokenizer(text[:512], return_tensors="pt", truncation=True, max_length=512, padding=True)
+        with torch.no_grad():
+            logits = net(enc["input_ids"], enc["attention_mask"])
+        return torch.sigmoid(logits).squeeze(0).tolist()
+
+    def _infer_sklearn(self, text: str, clf_data: dict) -> list:
+        import nltk
+        st_model = clf_data["st_model"]
+        scaler = clf_data.get("scaler")
+        classifier = clf_data["classifier"]
+
+        emb = st_model.encode([text], convert_to_numpy=True)
+
+        # Append 3 text-stat features appended during training
+        words = text.split()
+        try:
+            sents = nltk.sent_tokenize(text)
+        except Exception:
+            sents = [text]
+        avg_word_len = float(np.mean([len(w) for w in words])) if words else 0.0
+        extra = np.array([[float(len(words)), float(len(sents)), avg_word_len]])
+        features = np.hstack([emb, extra])
+
+        if scaler is not None:
+            try:
+                features = scaler.transform(features)
+            except Exception:
+                pass
+
+        preds = classifier.predict(features)[0]  # (7,)
+        return [float(v) / 10.0 for v in preds]
 
     # ------------------------------------------------------------------
     # Helpers

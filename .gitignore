@@ -31,6 +31,12 @@ training/training_set_rel3.tsv
 training/en_labeled.json
 training/ru_labeled.json
 training/kz_labeled.json
+training/dataset.json
+training/dataset_no_kz.json
+training/en_fix.json
+training/kz_part.json
+training/kz_part_new.json
+training/ru_part.json
 
 # БД
 *.db
