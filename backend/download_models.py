@@ -11,6 +11,8 @@ MODELS_DIR = Path(__file__).parent / "models_trained"
 
 
 def download_models() -> None:
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+
     hf_token = os.getenv("HF_TOKEN")
     hf_repo = os.getenv("HF_REPO_ID")  # например: yourname/invisionu-models
 
@@ -20,8 +22,6 @@ def download_models() -> None:
 
     try:
         from huggingface_hub import hf_hub_download
-
-        MODELS_DIR.mkdir(exist_ok=True)
 
         for filename in MODELS:
             dest = MODELS_DIR / filename
