@@ -121,7 +121,8 @@ class NLPModel:
             return
         self._fallback = SentenceTransformer(settings.NLP_FALLBACK_MODEL)
         self._precompute_kw_embeddings()
-        self._load_pkl_models()
+        # Skip heavy .pkl models to save memory (Railway free tier = 512 MB)
+        # self._load_pkl_models()
         self._ready = True
 
     def _load_pkl_models(self) -> None:

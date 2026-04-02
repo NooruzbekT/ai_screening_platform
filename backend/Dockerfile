@@ -18,4 +18,4 @@ COPY . .
 RUN mkdir -p models_trained audio_cache
 
 EXPOSE 8000
-CMD ["sh", "-c", "python download_models.py && uvicorn app.main:app --host 0.0.0.0 --port $PORT"]
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port $PORT"]
