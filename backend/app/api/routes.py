@@ -68,7 +68,11 @@ router = APIRouter()
 # Auth helpers
 # ---------------------------------------------------------------------------
 
-_pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+_pwd_context = CryptContext(
+    schemes=["bcrypt"],
+    deprecated="auto",
+    bcrypt__truncate_error=False,
+)
 _oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
 
