@@ -11,6 +11,8 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt .
 # Install CPU-only torch first (saves ~2GB vs CUDA build)
 RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+# Force bcrypt downgrade (Railway cache issue)
+RUN pip install --no-cache-dir --force-reinstall bcrypt==4.0.1
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
