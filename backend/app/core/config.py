@@ -6,6 +6,8 @@ class Settings(BaseSettings):
     GROQ_API_KEY: str = ""
     GROQ_MODEL: str = "llama-3.3-70b-versatile"
 
+    CORS_ORIGINS: list[str] = ["https://invision-u-seven.vercel.app"]
+
     DATABASE_URL: str = "postgresql://user:pass@db:5432/invisionu"
 
     JWT_SECRET: str = "change-me-use-min-32-chars-random-string-here"
