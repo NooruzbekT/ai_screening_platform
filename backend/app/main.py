@@ -17,16 +17,46 @@ app = FastAPI(
 # CORS must be added BEFORE routes
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://invision-u-seven.vercel.app"],
-    allow_credentials=False,
-    allow_methods=["*"],
+    allow_origins=settings.CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=3600,
 )
 
-# Serve generated TTS audio files
-audio_dir = Path(settings.AUDIO_CACHE_DIR)
-audio_dir.mkdir(exist_ok=True)
-app.mount("/audio", StaticFiles(directory=str(audio_dir)), name="audio")
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Return a JSON response with CORS headers so the browser can read the error.
+
+    Starlette's CORSMiddleware only processes responses that pass through the
+    normal middleware stack; unhandled exceptions bypass it and arrive at the
+    client without CORS headers, causing a confusing network error instead of
+    the real error message.  This handler re-attaches the appropriate
+    Access-Control-Allow-Origin header before the response leaves the server.
+
+    HTTPExceptions (e.g. the 400 raised by password-length validation) are
+    returned with their original status code and detail so the frontend can
+    display the correct error rather than a generic 500.
+    """
+    origin = request.headers.get("origin", "")
+    headers = {}
+    if origin in settings.CORS_ORIGINS:
+        headers["Access-Control-Allow-Origin"] = origin
+
+    if isinstance(exc, HTTPException):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail},
+            headers=headers,
+        )
+
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error"},
+        headers=headers,
+    )
 
 
 @app.on_event("startup")
