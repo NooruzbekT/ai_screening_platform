@@ -196,7 +196,37 @@ class DashboardResponse(BaseModel):
     zone_b: int
     zone_c: int
     pending_review: int
+    by_program: Dict[str, int]
     applications: List[ApplicationSummary]
+
+
+# ---------------------------------------------------------------------------
+# Questions
+# ---------------------------------------------------------------------------
+
+class QuestionCreate(BaseModel):
+    program: ProgramEnum
+    order: int = 0
+    text: str = Field(min_length=10)
+
+
+class QuestionUpdate(BaseModel):
+    order: Optional[int] = None
+    text: Optional[str] = Field(default=None, min_length=10)
+
+
+class QuestionResponse(BaseModel):
+    id: UUID
+    program: ProgramEnum
+    order: int
+    text: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class VideoQuestionsResponse(BaseModel):
+    questions: List[str]
 
 
 class StatsResponse(BaseModel):

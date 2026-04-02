@@ -28,11 +28,15 @@ from app.api.schemas import (
     InterviewMessageResponse,
     InterviewStartResponse,
     LoginRequest,
+    QuestionCreate,
+    QuestionResponse,
+    QuestionUpdate,
     RegisterRequest,
     ScoreDetail,
     SettingsUpdate,
     StatsResponse,
     TokenResponse,
+    VideoQuestionsResponse,
     VideoUpdate,
 )
 from app.core.config import settings
@@ -45,6 +49,7 @@ from app.db.models import (
     AuditLog,
     Decision,
     InterviewLog,
+    Question,
     Score,
     ScoreLayer,
     User,
@@ -54,6 +59,8 @@ from app.models import consistency as consistency_mod
 from app.models import llm_explainer
 from app.models.nlp_model import nlp_model
 from app.models.scorer import score_application
+
+_MAX_INTERVIEW_QUESTIONS = 4
 
 router = APIRouter()
 
@@ -272,6 +279,94 @@ def get_status(
 
 
 # ---------------------------------------------------------------------------
+# Questions (reviewer manages, applicant reads)
+# ---------------------------------------------------------------------------
+
+@router.get("/questions", response_model=List[QuestionResponse])
+def get_questions(
+    program: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    q = db.query(Question)
+    if program:
+        q = q.filter(Question.program == program)
+    return q.order_by(Question.program, Question.order).all()
+
+
+@router.post("/questions", response_model=QuestionResponse, status_code=201)
+def create_question(
+    body: QuestionCreate,
+    reviewer: User = Depends(_require_reviewer),
+    db: Session = Depends(get_db),
+):
+    question = Question(
+        program=body.program,
+        order=body.order,
+        text=body.text,
+        created_by=reviewer.id,
+    )
+    db.add(question)
+    db.commit()
+    db.refresh(question)
+    return question
+
+
+@router.put("/questions/{question_id}", response_model=QuestionResponse)
+def update_question(
+    question_id: uuid.UUID,
+    body: QuestionUpdate,
+    reviewer: User = Depends(_require_reviewer),
+    db: Session = Depends(get_db),
+):
+    question = db.get(Question, question_id)
+    if question is None:
+        raise HTTPException(status_code=404, detail="Question not found")
+    if body.order is not None:
+        question.order = body.order
+    if body.text is not None:
+        question.text = body.text
+    db.commit()
+    db.refresh(question)
+    return question
+
+
+@router.delete("/questions/{question_id}", status_code=204)
+def delete_question(
+    question_id: uuid.UUID,
+    reviewer: User = Depends(_require_reviewer),
+    db: Session = Depends(get_db),
+):
+    question = db.get(Question, question_id)
+    if question is None:
+        raise HTTPException(status_code=404, detail="Question not found")
+    db.delete(question)
+    db.commit()
+
+
+@router.get("/applications/{app_id}/video-questions", response_model=VideoQuestionsResponse)
+async def get_video_questions(
+    app_id: uuid.UUID,
+    user: User = Depends(_current_user),
+    db: Session = Depends(get_db),
+):
+    app = _get_own_application(app_id, user, db)
+    written = [a for a in app.answers if a.source == AnswerSource.form and a.text]
+    if not written:
+        raise HTTPException(status_code=400, detail="No written answers found")
+
+    written_text = "\n\n".join(a.text for a in written)
+    nlp_scores, _ = nlp_model.score(written_text, [a.question_id for a in written])
+
+    answers_data = [{"question_id": a.question_id, "text": a.text} for a in written]
+    questions = llm_explainer.generate_video_questions(
+        answers=answers_data,
+        nlp_scores=nlp_scores,
+        program=app.program.value,
+    )
+    return VideoQuestionsResponse(questions=questions)
+
+
+# ---------------------------------------------------------------------------
 # Interview (Zone B)
 # ---------------------------------------------------------------------------
 
@@ -287,7 +382,6 @@ async def start_interview(
     if app.status != ApplicationStatus.awaiting_interview:
         raise HTTPException(status_code=400, detail="Application is not in awaiting_interview status")
 
-    # Find contradictions
     written_score = _get_layer_score(app, ScoreLayer.nlp_written)
     video_score = _get_layer_score(app, ScoreLayer.nlp_video)
     w_scores = (written_score.scores or {}) if written_score else {}
@@ -303,26 +397,32 @@ async def start_interview(
             for a in app.answers if a.source == AnswerSource.form and a.text
         ],
     }
-    questions = llm_explainer.generate_interview_questions(app_data, contradictions)
 
-    # Create interview log
+    system_context = llm_explainer.build_interview_system_context(
+        app_data, contradictions, _MAX_INTERVIEW_QUESTIONS
+    )
+    first_q, _ = llm_explainer.generate_next_question([], system_context)
+    if not first_q:
+        first_q = "Расскажите о конкретном случае, который повлиял на ваш выбор этой программы."
+
     log_entry = InterviewLog(
         application_id=app_id,
-        messages=[{"role": "questions", "content": questions}],
+        messages=[
+            {"role": "system_context", "content": system_context},
+            {"role": "assistant", "content": first_q},
+        ],
     )
     db.add(log_entry)
     db.commit()
     db.refresh(log_entry)
 
-    first_q = questions[0] if questions else "Расскажите о себе"
     audio_url = await llm_explainer.text_to_speech(first_q)
-
     return InterviewStartResponse(
         interview_id=log_entry.id,
         question=first_q,
         audio_url=audio_url,
         question_number=1,
-        total_questions=len(questions),
+        total_questions=_MAX_INTERVIEW_QUESTIONS,
     )
 
 
@@ -338,18 +438,16 @@ async def interview_message(
         raise HTTPException(status_code=404, detail="Interview not found")
 
     messages: list = list(log_entry.messages or [])
-    questions: list = []
-    for m in messages:
-        if m.get("role") == "questions":
-            questions = m["content"]
-            break
 
+    system_context = next(
+        (m["content"] for m in messages if m.get("role") == "system_context"), ""
+    )
     user_answers = [m for m in messages if m.get("role") == "user"]
-    messages.append({"role": "user", "content": body.text})
     answer_count = len(user_answers) + 1
 
-    if answer_count >= len(questions):
-        # Interview complete — re-score interview answers
+    messages.append({"role": "user", "content": body.text})
+
+    if answer_count >= _MAX_INTERVIEW_QUESTIONS:
         log_entry.messages = messages
         log_entry.completed_at = datetime.now(timezone.utc)
 
@@ -366,14 +464,13 @@ async def interview_message(
         final_score_rec = _get_layer_score(app, ScoreLayer.rule)
         old_final = (final_score_rec.final_score or 0.0) if final_score_rec else 0.0
 
-        new_zone = "A" if (old_final >= settings.ZONE_A_THRESHOLD and new_cons >= settings.CONSISTENCY_THRESHOLD) else "C"
+        new_zone = "A" if (
+            old_final >= settings.ZONE_A_THRESHOLD
+            and new_cons >= settings.CONSISTENCY_THRESHOLD
+        ) else "C"
         log_entry.new_zone = new_zone
         log_entry.final_score = old_final
-
-        if new_zone == "A":
-            app.status = ApplicationStatus.zone_a
-        else:
-            app.status = ApplicationStatus.zone_c
+        app.status = ApplicationStatus.zone_a if new_zone == "A" else ApplicationStatus.zone_c
 
         db.add(Answer(
             application_id=app.id,
@@ -382,13 +479,17 @@ async def interview_message(
             text=interview_text,
         ))
         db.commit()
-
         return InterviewMessageResponse(is_complete=True)
 
-    # Generate next question
-    next_q_idx = answer_count
-    next_q = questions[next_q_idx] if next_q_idx < len(questions) else None
-    if not next_q:
+    # Build conversation for Groq (skip system_context storage entry)
+    groq_msgs = [
+        {"role": m["role"], "content": m["content"]}
+        for m in messages
+        if m.get("role") in ("assistant", "user")
+    ]
+    next_q, is_complete = llm_explainer.generate_next_question(groq_msgs, system_context)
+
+    if is_complete or not next_q:
         return InterviewMessageResponse(is_complete=True)
 
     messages.append({"role": "assistant", "content": next_q})
@@ -400,7 +501,7 @@ async def interview_message(
         next_question=next_q,
         audio_url=audio_url,
         is_complete=False,
-        question_number=next_q_idx + 1,
+        question_number=answer_count + 1,
     )
 
 
@@ -416,6 +517,11 @@ def dashboard(
     apps = db.query(Application).all()
     summaries = [_to_summary(a, db) for a in apps]
 
+    by_program: dict = {}
+    for a in apps:
+        key = a.program.value
+        by_program[key] = by_program.get(key, 0) + 1
+
     return DashboardResponse(
         total=len(apps),
         zone_a=sum(1 for a in apps if a.status == ApplicationStatus.zone_a),
@@ -425,6 +531,7 @@ def dashboard(
         pending_review=sum(1 for a in apps if a.status in (
             ApplicationStatus.zone_a, ApplicationStatus.zone_b,
             ApplicationStatus.awaiting_interview)),
+        by_program=by_program,
         applications=summaries,
     )
 
@@ -639,7 +746,7 @@ def seed(
 _SEED_ARCHETYPES = [
     # A — «Скрытый талант»
     {
-        "email": "aigerin.dosova@seed.test",
+        "email": "aigerin.dosova@seed.invisionu.kz",
         "full_name": "Айгерим Досова",
         "program": "foundation",
         "city": "Шымкент",
@@ -678,7 +785,7 @@ _SEED_ARCHETYPES = [
     },
     # B — «Кризисный лидер»
     {
-        "email": "maksat.kenzheev@seed.test",
+        "email": "maksat.kenzheev@seed.invisionu.kz",
         "full_name": "Максат Кенжеев",
         "program": "bachelor",
         "city": "Кызылорда",
@@ -716,7 +823,7 @@ _SEED_ARCHETYPES = [
     },
     # C — «ChatGPT-заявка»
     {
-        "email": "dana.nurlanova@seed.test",
+        "email": "dana.nurlanova@seed.invisionu.kz",
         "full_name": "Дана Нурланова",
         "program": "bachelor",
         "city": "Алматы",

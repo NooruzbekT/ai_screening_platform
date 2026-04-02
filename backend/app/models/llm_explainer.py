@@ -153,6 +153,79 @@ def generate_next_question(
 
 
 # ---------------------------------------------------------------------------
+# Video question generation
+# ---------------------------------------------------------------------------
+
+def generate_video_questions(
+    answers: list[dict],
+    nlp_scores: dict,
+    program: str,
+    n_questions: int = 2,
+) -> list[str]:
+    """Generate personalized video questions based on written answers + NLP scores."""
+    weak = sorted(nlp_scores.items(), key=lambda x: x[1])[:3]
+    weak_str = ", ".join(f"{q} ({s:.1f}/10)" for q, s in weak)
+    answers_str = "\n".join(
+        f"- Q{a['question_id']}: {(a.get('text') or '')[:250]}"
+        for a in answers if a.get("text")
+    )
+    prompt = f"""Ты помощник приёмной комиссии inVision U (Казахстан).
+Программа кандидата: {program}.
+
+Письменные ответы:
+{answers_str}
+
+Слабые стороны по NLP-анализу: {weak_str}
+
+Сгенерируй ровно {n_questions} вопроса для видеопрезентации.
+Каждый вопрос даёт кандидату шанс раскрыть слабые стороны через конкретную историю.
+Не повторяй письменные вопросы дословно.
+Язык: русский. Формат: каждый вопрос с новой строки, начинается с цифры и точки.
+
+Вопросы:"""
+    client = _get_client()
+    resp = client.chat.completions.create(
+        model=settings.GROQ_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.7,
+        max_tokens=300,
+    )
+    return _parse_questions(resp.choices[0].message.content.strip(), n_questions)
+
+
+def build_interview_system_context(
+    app_data: dict,
+    contradictions: list,
+    max_questions: int = 4,
+) -> str:
+    """Build system prompt for dynamic Pre-Interview."""
+    contra_str = "\n".join(
+        f"- {c['quality']}: письменно={c['written']:.1f}, видео={c['video']:.1f}"
+        for c in contradictions
+    ) or "Явных противоречий нет — уточни мотивацию и детали историй."
+    answers_str = "\n".join(
+        f"- {a['question_id']}: {(a.get('text') or '')[:200]}"
+        for a in app_data.get("answers", []) if a.get("text")
+    )
+    return f"""Ты проводишь уточняющее Pre-Interview для приёмной комиссии inVision U.
+Кандидат: {app_data.get('full_name')}, программа: {app_data.get('program')}, город: {app_data.get('city')}.
+
+Письменные ответы кандидата:
+{answers_str}
+
+Расхождения письмо vs видео:
+{contra_str}
+
+Правила:
+- Задай ровно {max_questions} вопроса, по одному за раз
+- Вопросы ТОЛЬКО по конкретным местам заявки — никаких общих
+- Каждый следующий вопрос учитывает предыдущий ответ кандидата
+- Углубляйся в детали, проверяй аутентичность историй
+- Язык — тот же что использует кандидат (RU/KZ/EN)
+- После {max_questions}-го ответа кандидата верни ТОЛЬКО: INTERVIEW_COMPLETE"""
+
+
+# ---------------------------------------------------------------------------
 # TTS via edge-tts
 # ---------------------------------------------------------------------------
 

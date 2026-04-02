@@ -3,7 +3,7 @@ import enum
 
 from sqlalchemy import (
     Boolean, Column, DateTime, Enum as SAEnum,
-    Float, ForeignKey, String, Text,
+    Float, ForeignKey, Integer, String, Text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import relationship
@@ -151,6 +151,18 @@ class InterviewLog(Base):
     completed_at = Column(DateTime(timezone=True), nullable=True)
 
     application = relationship("Application", back_populates="interview_logs")
+
+
+class Question(Base):
+    __tablename__ = "questions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    program = Column(SAEnum(ProgramType), nullable=False)
+    order = Column(Integer, nullable=False, default=0)
+    text = Column(Text, nullable=False)
+    created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
 class AuditLog(Base):
