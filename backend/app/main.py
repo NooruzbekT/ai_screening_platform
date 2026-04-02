@@ -1,5 +1,6 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 
@@ -16,17 +17,16 @@ app = FastAPI(
 # CORS must be added BEFORE routes
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://invision-u-seven.vercel.app",
-        "http://localhost:3000",
-        "http://localhost:5173",
-    ],
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    allow_origins=["https://invision-u-seven.vercel.app"],
+    allow_credentials=False,
+    allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["*"],
-    max_age=3600,
 )
+
+# Serve generated TTS audio files
+audio_dir = Path(settings.AUDIO_CACHE_DIR)
+audio_dir.mkdir(exist_ok=True)
+app.mount("/audio", StaticFiles(directory=str(audio_dir)), name="audio")
 
 
 @app.on_event("startup")
