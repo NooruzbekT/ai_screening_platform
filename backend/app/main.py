@@ -18,7 +18,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
     allow_credentials=False,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -32,7 +32,17 @@ async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSON
     client without CORS headers, causing a confusing network error instead of
     the real error message.  This handler re-attaches the appropriate
     Access-Control-Allow-Origin header before the response leaves the server.
+
+    OPTIONS preflight requests are excluded: the exception handler must not
+    intercept them because doing so returns a 500 before CORSMiddleware can
+    attach the required Access-Control-* headers, causing the browser to block
+    the subsequent real request.
     """
+    if request.method == "OPTIONS":
+        # Let CORSMiddleware handle the preflight response entirely.
+        from starlette.responses import Response
+        return Response(status_code=200)
+
     origin = request.headers.get("origin", "")
     headers = {}
     if origin in settings.CORS_ORIGINS:
