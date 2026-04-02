@@ -8,6 +8,7 @@ class Settings(BaseSettings):
 
     CORS_ORIGINS: list[str] = [
         "https://invision-u-seven.vercel.app",
+        "https://invision-cbwcg8cd7-mlnchlvmes-projects.vercel.app",
         "http://localhost:3000",
         "http://localhost:5173",
     ]
