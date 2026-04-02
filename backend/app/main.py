@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -25,18 +25,30 @@ app.add_middleware(
 
 @app.exception_handler(Exception)
 async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    """Return a JSON 500 with CORS headers so the browser can read the error.
+    """Return a JSON response with CORS headers so the browser can read the error.
 
     Starlette's CORSMiddleware only processes responses that pass through the
     normal middleware stack; unhandled exceptions bypass it and arrive at the
     client without CORS headers, causing a confusing network error instead of
     the real error message.  This handler re-attaches the appropriate
     Access-Control-Allow-Origin header before the response leaves the server.
+
+    HTTPExceptions (e.g. the 400 raised by password-length validation) are
+    returned with their original status code and detail so the frontend can
+    display the correct error rather than a generic 500.
     """
     origin = request.headers.get("origin", "")
     headers = {}
     if origin in settings.CORS_ORIGINS:
         headers["Access-Control-Allow-Origin"] = origin
+
+    if isinstance(exc, HTTPException):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail},
+            headers=headers,
+        )
+
     return JSONResponse(
         status_code=500,
         content={"detail": "Internal server error"},
