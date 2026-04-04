@@ -134,6 +134,29 @@ class ScoreDetail(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class AnswerDetail(BaseModel):
+    question_id: str
+    source: str
+    text: Optional[str] = None
+    video_url: Optional[str] = None
+    transcript: Optional[str] = None
+
+    model_config = {"from_attributes": True}
+
+
+class InterviewMessageDetail(BaseModel):
+    role: str    # "assistant" | "user"
+    content: str
+
+
+class InterviewLogDetail(BaseModel):
+    interview_id: UUID
+    messages: List[InterviewMessageDetail]
+    final_score: Optional[float] = None
+    new_zone: Optional[str] = None
+    completed_at: Optional[datetime] = None
+
+
 class ApplicationDetail(BaseModel):
     id: UUID
     status: ApplicationStatusEnum
@@ -143,7 +166,9 @@ class ApplicationDetail(BaseModel):
     regional_coeff: Optional[float]
     full_name: str
     documents: Optional[Dict[str, Any]] = None
+    answers: List[AnswerDetail] = []
     scores: List[ScoreDetail] = []
+    interview_log: Optional[InterviewLogDetail] = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -170,6 +195,7 @@ class InterviewMessageResponse(BaseModel):
     audio_url: Optional[str] = None
     is_complete: bool = False
     question_number: Optional[int] = None
+    new_zone: Optional[str] = None  # "A" or "C" when is_complete=True
 
 
 # ---------------------------------------------------------------------------
@@ -192,12 +218,15 @@ class ApplicationSummary(BaseModel):
 
 class DashboardResponse(BaseModel):
     total: int
+    total_filtered: int
     zone_a: int
     zone_b: int
     zone_c: int
     pending_review: int
     by_program: Dict[str, int]
     applications: List[ApplicationSummary]
+    page: int
+    page_size: int
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +291,16 @@ class DecisionResponse(BaseModel):
 # Settings
 # ---------------------------------------------------------------------------
 
+class SettingsResponse(BaseModel):
+    zone_a_threshold: float
+    zone_b_threshold: float
+    ai_detector_threshold: float
+    consistency_threshold: float
+    nlp_weight: float
+    struct_weight: float
+    regional_coeffs: Dict[str, Any]
+
+
 class SettingsUpdate(BaseModel):
     zone_a_threshold: Optional[float] = Field(default=None, ge=0.0, le=10.0)
     zone_b_threshold: Optional[float] = Field(default=None, ge=0.0, le=10.0)
@@ -269,3 +308,4 @@ class SettingsUpdate(BaseModel):
     consistency_threshold: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     nlp_weight: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     struct_weight: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    regional_coeffs: Optional[Dict[str, float]] = None

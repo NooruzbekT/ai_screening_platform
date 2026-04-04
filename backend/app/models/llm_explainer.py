@@ -12,13 +12,43 @@ from groq import Groq
 from app.core.config import settings
 
 _groq_client: Optional[Groq] = None
+_anthropic_client = None
 
 
-def _get_client() -> Groq:
+def _get_groq() -> Groq:
     global _groq_client
     if _groq_client is None:
         _groq_client = Groq(api_key=settings.GROQ_API_KEY)
     return _groq_client
+
+
+def _get_claude():
+    global _anthropic_client
+    if _anthropic_client is None:
+        from anthropic import Anthropic
+        _anthropic_client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+    return _anthropic_client
+
+
+def _claude(prompt: str, model: str, max_tokens: int = 800) -> str:
+    client = _get_claude()
+    msg = client.messages.create(
+        model=model,
+        max_tokens=max_tokens,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return msg.content[0].text.strip()
+
+
+def _groq(prompt: str, max_tokens: int = 600, temperature: float = 0.3) -> str:
+    client = _get_groq()
+    resp = client.chat.completions.create(
+        model=settings.GROQ_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+    return resp.choices[0].message.content.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -26,25 +56,47 @@ def _get_client() -> Groq:
 # ---------------------------------------------------------------------------
 
 def explain(payload: dict) -> Dict[str, str]:
-    """Send NLP scores to Groq, return dict of Russian text explanations."""
+    """Generate Russian explanations via Claude Sonnet (falls back to Groq)."""
     prompt = _build_explain_prompt(payload)
-    client = _get_client()
-    resp = client.chat.completions.create(
-        model=settings.GROQ_MODEL,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.3,
-        max_tokens=600,
-    )
-    raw = resp.choices[0].message.content.strip()
+    try:
+        if settings.ANTHROPIC_API_KEY:
+            raw = _claude(prompt, settings.CLAUDE_MODEL_HEAVY, max_tokens=800)
+        else:
+            raw = _groq(prompt, max_tokens=600)
+    except Exception:
+        raw = _groq(prompt, max_tokens=600)
     return _parse_explain_response(raw, payload)
 
 
 def _build_explain_prompt(p: dict) -> str:
     scores_str = json.dumps(p.get("scores", {}), ensure_ascii=False, indent=2)
     ai = p.get("ai_detector", {})
+    zone = p.get("zone", "?")
+    final_score = p.get("final_score", 0.0)
+    struct_score = p.get("struct_score", 0.0)
+    consistency = p.get("consistency_score")
+    reject_reason = p.get("reject_reason", "")
+
+    if reject_reason:
+        zone_hint = (
+            f"Автоотклонение. Причина: {reject_reason}. "
+            f"Объясни это в zone_explanation одним предложением."
+        )
+    else:
+        cons_str = f"{consistency:.2f}" if consistency is not None else "—"
+        zone_hint = (
+            f"Итоговый скор: {final_score:.2f}/10 "
+            f"(NLP×0.7 + структурный {struct_score:.2f}×0.3 × регион.коэф.). "
+            f"Согласованность письмо/видео: {cons_str}. "
+            f"AI-вероятность: {ai.get('composite', '—')}. "
+            f"Зона: {zone}. "
+            f"В zone_explanation объясни КОНКРЕТНО почему именно эта зона — "
+            f"цитируй числа, порог, что перевесило."
+        )
+
     return f"""Ты аналитик приёмной комиссии inVision U (Казахстан).
 Тебе даны числовые скоры NLP-анализа заявки кандидата.
-Объясни каждый скор одним-двумя предложениями на русском языке — кратко и конкретно.
+Объясни каждый скор одним-двумя предложениями на русском — кратко и конкретно.
 Не выставляй новые числа. Используй только данные ниже.
 
 Скоры качеств (0–10):
@@ -52,11 +104,13 @@ def _build_explain_prompt(p: dict) -> str:
 
 AI-детектор: перплексия={ai.get('perplexity')}, burstiness={ai.get('burstiness')}, specificity={ai.get('specificity')}, composite={ai.get('composite')}
 Регион: {p.get('city', '—')}, коэффициент={p.get('regional_coeff', 1.0)}
-Зона: {p.get('zone', '?')}
+
+{zone_hint}
 
 Ответь строго в формате JSON:
 {{
-  "summary": "общий вывод",
+  "zone_explanation": "2-3 предложения: почему именно эта зона, конкретные числа",
+  "summary": "общий вывод об уровне кандидата",
   "leadership": "объяснение",
   "motivation": "объяснение",
   "perseverance": "объяснение",
@@ -135,14 +189,22 @@ def _parse_questions(raw: str, n: int) -> list[str]:
 def generate_next_question(
     messages: list[dict],
     system_context: str,
-    language: str = "ru",
 ) -> tuple[str, bool]:
-    """Continue interview. Returns (next_question_or_done, is_complete)."""
-    client = _get_client()
+    """Continue interview. Returns (next_question, is_complete).
+
+    messages — only role=assistant/user entries (system_context is passed separately).
+    """
+    answered = sum(1 for m in messages if m.get("role") == "user")
+    # Inject current progress so LLM always knows where it is
+    progress_note = (
+        f"\n[Внутренний счётчик: кандидат уже ответил на {answered} из "
+        f"отведённых вопросов. Следующий вопрос — #{answered + 1}.]"
+    )
+    client = _get_groq()
     resp = client.chat.completions.create(
         model=settings.GROQ_MODEL,
-        messages=[{"role": "system", "content": system_context}] + messages,
-        temperature=0.7,
+        messages=[{"role": "system", "content": system_context + progress_note}] + messages,
+        temperature=0.6,
         max_tokens=200,
     )
     content = resp.choices[0].message.content.strip()
@@ -183,14 +245,25 @@ def generate_video_questions(
 Язык: русский. Формат: каждый вопрос с новой строки, начинается с цифры и точки.
 
 Вопросы:"""
-    client = _get_client()
-    resp = client.chat.completions.create(
-        model=settings.GROQ_MODEL,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.7,
-        max_tokens=300,
-    )
-    return _parse_questions(resp.choices[0].message.content.strip(), n_questions)
+    try:
+        if settings.ANTHROPIC_API_KEY:
+            raw = _claude(prompt, settings.CLAUDE_MODEL_FAST, max_tokens=300)
+        else:
+            raw = _groq(prompt, max_tokens=300, temperature=0.7)
+    except Exception:
+        raw = _groq(prompt, max_tokens=300, temperature=0.7)
+    return _parse_questions(raw, n_questions)
+
+
+_QUALITY_RU = {
+    "leadership":           "лидерство",
+    "motivation":           "мотивация",
+    "perseverance":         "настойчивость / стрессоустойчивость",
+    "teamwork":             "командная работа",
+    "goal_pursuit":         "целеустремлённость",
+    "intrinsic_motivation": "внутренняя мотивация",
+    "prosocial_purpose":    "просоциальная направленность",
+}
 
 
 def build_interview_system_context(
@@ -198,31 +271,72 @@ def build_interview_system_context(
     contradictions: list,
     max_questions: int = 4,
 ) -> str:
-    """Build system prompt for dynamic Pre-Interview."""
-    contra_str = "\n".join(
-        f"- {c['quality']}: письменно={c['written']:.1f}, видео={c['video']:.1f}"
-        for c in contradictions
-    ) or "Явных противоречий нет — уточни мотивацию и детали историй."
+    """Build system prompt for dynamic Pre-Interview with follow-up logic."""
+    answers = app_data.get("answers", [])
     answers_str = "\n".join(
-        f"- {a['question_id']}: {(a.get('text') or '')[:200]}"
-        for a in app_data.get("answers", []) if a.get("text")
+        f'[{a["question_id"]}]: "{(a.get("text") or "").strip()[:300]}"'
+        for a in answers if a.get("text")
     )
-    return f"""Ты проводишь уточняющее Pre-Interview для приёмной комиссии inVision U.
-Кандидат: {app_data.get('full_name')}, программа: {app_data.get('program')}, город: {app_data.get('city')}.
 
-Письменные ответы кандидата:
+    has_video = any(c.get("video", 0) > 0 for c in contradictions)
+
+    # Build numbered topic list with context from actual answers
+    topics_lines = []
+    for i, c in enumerate(contradictions[:max_questions], 1):
+        quality_ru = _QUALITY_RU.get(c["quality"], c["quality"])
+        if has_video:
+            gap = c["written"] - c["video"]
+            direction = "письменно выше чем в видео" if gap > 0 else "видео выше чем письменно"
+            hint = f"расхождение {abs(gap):.1f} пунктов ({direction})"
+        else:
+            hint = f"письменный скор {c['written']:.1f}/10 — требует проверки"
+        topics_lines.append(f"Тема {i}. {quality_ru.upper()} — {hint}")
+
+    if not topics_lines:
+        topics_lines = [
+            "Тема 1. МОТИВАЦИЯ — уточни конкретную причину выбора программы",
+            "Тема 2. ЛИДЕРСТВО — попроси конкретный пример инициативы",
+        ]
+
+    topics_str = "\n".join(topics_lines)
+
+    return f"""Ты — интервьюер приёмной комиссии inVision U (Казахстан).
+Проводишь уточняющее Pre-Interview. Всего вопросов: {max_questions}.
+
+КАНДИДАТ: {app_data.get('full_name')}, программа: {app_data.get('program')}, город: {app_data.get('city')}
+
+ПИСЬМЕННЫЕ ОТВЕТЫ КАНДИДАТА:
 {answers_str}
 
-Расхождения письмо vs видео:
-{contra_str}
+ТЕМЫ ДЛЯ ПРОВЕРКИ (в порядке приоритета):
+{topics_str}
 
-Правила:
-- Задай ровно {max_questions} вопроса, по одному за раз
-- Вопросы ТОЛЬКО по конкретным местам заявки — никаких общих
-- Каждый следующий вопрос учитывает предыдущий ответ кандидата
-- Углубляйся в детали, проверяй аутентичность историй
-- Язык — тот же что использует кандидат (RU/KZ/EN)
-- После {max_questions}-го ответа кандидата верни ТОЛЬКО: INTERVIEW_COMPLETE"""
+════════════════════════════════════
+АЛГОРИТМ — следуй строго:
+
+Вопрос 1: задай по Теме 1, сошлись на конкретную деталь из письменного ответа.
+
+После каждого ответа кандидата прими решение:
+
+  ЕСЛИ ответ КОНКРЕТНЫЙ — содержит хотя бы одно из:
+    • имя человека / организации
+    • число / дату / срок
+    • описание своего действия (я сделал / я решил / я организовал)
+  → задай ОДИН уточняющий вопрос по этому же ответу: "Что конкретно ты сделал дальше?" /
+    "Как ты убедил X?" / "Чем это закончилось?" — копай в детали той же истории.
+
+  ЕСЛИ ответ ОБЩИЙ — только абстракции, нет конкретики, нет действий:
+  → переходи к следующей Теме из списка. Не возвращайся к этой теме.
+
+Дополнительные правила:
+- Один вопрос за раз. Никогда не задавай два вопроса в одном сообщении.
+- Не объясняй своё решение и не хвали ответы кандидата. Сразу следующий вопрос.
+- Не повторяй то, о чём кандидат уже рассказал подробно.
+- Язык — тот же, что использует кандидат (RU / KZ / EN).
+
+ЗАВЕРШЕНИЕ: как только кандидат ответил на {max_questions}-й вопрос,
+верни ТОЛЬКО эту строку без каких-либо добавлений: INTERVIEW_COMPLETE
+════════════════════════════════════"""
 
 
 # ---------------------------------------------------------------------------

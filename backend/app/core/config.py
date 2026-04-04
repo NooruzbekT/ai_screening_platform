@@ -6,6 +6,13 @@ class Settings(BaseSettings):
     GROQ_API_KEY: str = ""
     GROQ_MODEL: str = "llama-3.3-70b-versatile"
 
+    ANTHROPIC_API_KEY: str = ""
+    CLAUDE_MODEL_HEAVY: str = "claude-sonnet-4-6"
+    CLAUDE_MODEL_FAST: str = "claude-haiku-4-5-20251001"
+
+    JURY_EMAIL: str
+    JURY_PASSWORD: str
+
     CORS_ORIGINS: list[str] = [
         "https://invision-u-seven.vercel.app",
         "https://invision-cbwcg8cd7-mlnchlvmes-projects.vercel.app",

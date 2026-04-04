@@ -1,245 +1,147 @@
 # inVision U — AI Screening Platform
 
 > **Decentrathon 5.0 · Track: AI inDrive**
-> Автоматизированная система скрининга абитуриентов на основе NLP и LLM
+
+## Проблема
+
+inVision U получает **965 заявок** на **35 мест**. Ручной скрининг каждой заявки — 15 минут. Итого: **241 час непрерывной работы** приёмной комиссии до начала учебного года.
+
+Вся работа сводится к трём повторяющимся действиям: проверить ENT, прочитать эссе, посмотреть видео. Это именно то, что делает AI.
+
+## Решение
+
+Автоматизированная система скрининга на трёх слоях:
+
+```
+Заявка
+  │
+  ▼  Слой 1: Rule Engine
+     ENT ≥ 80 / IELTS ≥ 6.0 / GPA (иностранцы)
+     Региональный коэффициент 0.95–1.15 (настраивается комиссией)
+  │
+  ▼  Слой 2: NLP + AI-детектор
+     7 качеств лидерства (Penn University метод)
+     Три модели: RoBERTa-EN / RuBERT-RU / mBERT-KZ
+     AI-детектор: perplexity + burstiness + NER specificity
+     Consistency Score: письмо ↔ видео ↔ интервью
+  │
+  ▼  Слой 3: LLM (Claude Sonnet + Groq Llama-3.3-70b)
+     Только объясняет числа — не выставляет баллы
+  │
+  ▼
+  Зона A → рекомендован к зачислению
+  Зона B → AI Pre-Interview (голосовой чат, 4 вопроса)
+  Зона C → отклонён с объяснением для комиссии
+```
+
+**Результат: 25 часов вместо 241. −90%.**
 
 ---
 
-## 🚀 Быстрый старт — 2 варианта
+## Быстрый старт для жюри
 
-### Вариант 1: Живое демо (рекомендуется для жюри)
-
-Всё уже задеплоено и готово к работе:
-
-| Компонент | URL |
-|-----------|-----|
-| **Фронтенд** | https://invision-u-seven.vercel.app |
-| **Backend API** | https://invisionu-screening.up.railway.app |
-| **Swagger UI** | https://invisionu-screening.up.railway.app/api/docs |
-
-**Аккаунт для жюри (reviewer):**
-```
-Email:    jury@invisionu.kz
-Password: jury2025!
-```
-
----
-
-### Вариант 2: Локальный запуск через Docker
-
-**Требования:** Docker Desktop, 8+ GB RAM, интернет (для загрузки моделей)
-
-```bash
-# 1. Клонировать репозиторий
-git clone https://github.com/team/invisionu-screening
-cd invisionu-screening
-
-# 2. Настроить окружение
-cp .env.example .env
-```
-
-Открыть `.env` и заполнить два ключа:
-
-```env
-GROQ_API_KEY=gsk_...       # получить на console.groq.com (бесплатно)
-HF_TOKEN=hf_...            # получить на huggingface.co/settings/tokens
-HF_REPO_ID=Nooruzbek/invisionu-models  # уже указан — не менять
-```
-
-```bash
-# 3. Запустить
-docker-compose up --build
-```
-
-Первый запуск займёт **5–10 минут** (загрузка моделей из HuggingFace).
+Всё задеплоено:
 
 | Сервис | URL |
 |--------|-----|
-| Фронтенд | http://localhost:3000 |
-| Backend API | http://localhost:8000 |
-| Swagger UI | http://localhost:8000/api/docs |
+| Фронтенд | https://invision-u-seven.vercel.app |
+| Backend API | https://invisionu-screening.up.railway.app |
+| Swagger UI | https://invisionu-screening.up.railway.app/api/docs |
+
+Аккаунт комиссии создаётся автоматически при старте — логин из переменных окружения `JURY_EMAIL` / `JURY_PASSWORD`.
+
+**Загрузить синтетических кандидатов:**
+```bash
+# 1. Получить токен
+TOKEN=$(curl -s -X POST https://invisionu-screening.up.railway.app/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"<JURY_EMAIL>","password":"<JURY_PASSWORD>"}' | python -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+
+# 2. Залить 3 демо-кандидата
+curl -s -X POST https://invisionu-screening.up.railway.app/api/seed \
+  -H "Authorization: Bearer $TOKEN"
+```
 
 ---
 
-## 🎬 Сценарий демо для жюри
+## Три демо-кандидата
 
-### Шаг 1 — Загрузить тестовых кандидатов
+| Кандидат | Профиль | Скор | Зона |
+|----------|---------|------|------|
+| **Айгерим Досова**, Шымкент | ENT 91 · IELTS 6.5 · живые истории (пожар, 3D-кружок) · regional×1.0 | 9.21 | A |
+| **Максат Кенжеев**, Кызылорда | ENT 84 · IELTS 6.0 · кризисный лидер (паводок, 200 семей) · regional×1.12 | 8.83 | B → Pre-Interview |
+| **Дана Нурланова**, Алматы | ENT 95 · IELTS 7.0 · текст написан ChatGPT · ai_prob=0.87 | 5.9 | C |
 
-В Swagger UI или через curl:
+---
+
+## Что видит комиссия в карточке кандидата
+
+- **zone_explanation** — Claude Sonnet объясняет почему именно эта зона, цитируя конкретные числа
+- **Скоры 7 качеств** — leadership, motivation, perseverance и др. (0–10)
+- **AI-детектор** — perplexity, burstiness, NER specificity с порогами
+- **Attribution** — ключевые слова из текста, повлиявшие на скор
+- **Письменные ответы** — полный текст для ручной проверки
+- **Видео** — ссылка + транскрипт (Whisper)
+- **Диалог Pre-Interview** — полная стенограмма Q&A с голосового чата
+
+---
+
+## Ключевые принципы (§6 хакатона)
+
+- **Объяснимость**: комиссия видит каждое число — не чёрный ящик
+- **Human-in-the-loop**: reviewer всегда может override решение AI
+- **Без дискриминации**: пол, этнос, СЭС не собираются и не используются
+- **Региональная справедливость**: явный коэффициент, настраивается через API
+- **LLM не судья**: Claude/Groq только форматируют объяснения, зоны определяют числа
+
+---
+
+## Стек
+
+| Компонент | Технология | Стоимость |
+|-----------|-----------|-----------|
+| Backend | FastAPI + PostgreSQL | $0 |
+| NLP scoring | RuBERT / RoBERTa / mBERT + sklearn | $0 (локально) |
+| AI-детектор | GPT-2 perplexity + spaCy NER | $0 (локально) |
+| LLM объяснения | Claude Sonnet 4.6 (Anthropic API) | ~$0.01/заявка |
+| Голосовое интервью | Groq llama-3.3-70b + Edge TTS | $0 (free tier) |
+| Транскрипция видео | OpenAI Whisper medium (локально) | $0 |
+| Деплой | Railway Hobby + Vercel | $5/мес |
+
+**Итого за скрининговый сезон (965 заявок): ~$15.**
+
+---
+
+## Локальный запуск
 
 ```bash
-curl -X POST https://invisionu-screening.up.railway.app/api/seed \
-  -H "Authorization: Bearer <токен жюри>"
+git clone https://github.com/NooruzbekT/ai_screening_platform
+cd ai_screening_platform
+
+cp .env.example .env
 ```
 
-Или прямо в интерфейсе: **Dashboard → кнопка "Загрузить демо-данные"**
+Заполнить `.env`:
 
-Загрузятся три архетипа:
-
-| Кандидат | Профиль | Балл | Зона |
-|----------|---------|------|------|
-| **Айгерим Досова** | ENT 91, Шымкент, живые истории (экотряд, пожар) | 9.21 | ✅ A |
-| **Максат Кенжеев** | ENT 84, Кызылорда, кризисный лидер (паводок) | 8.83 | ⚡ B |
-| **Дана Нурланова** | ENT 95, Алматы, текст написан ChatGPT | 5.9 | ❌ C |
-
-### Шаг 2 — Dashboard комиссии
-
-- Ранжированный список заявок по финальному скору
-- Фильтры: зона / регион / AI-флаг / программа
-- Статистика в шапке: всего / зона A / зона B / зона C
-
-### Шаг 3 — Карточка Айгерим (Зона A)
-
-Показывает работу **региональных коэффициентов**: Шымкент ×1.12 поднял итоговый балл выше алматинского отличника. Вкладка «Attribution» — топ-слова, повлиявшие на каждый скор.
-
-### Шаг 4 — Карточка Даны (Зона C — AI-детектор)
-
-- AI-вероятность: **87%**
-- Perplexity: 12.4 (норма живого текста: 35–80)
-- Burstiness: 0.07 (норма: 3.0–8.0)
-- Specificity NER: 0.4% (норма: ≥8%) — нет имён, дат, мест
-
-### Шаг 5 — Страница Analytics
-
-AUROC по каждому из 7 качеств, Fairness-аудит по регионам, статистика AI-детектора, сравнение с rule-based baseline.
-
-### Шаг 6 — Настройки
-
-Веса качеств, пороги зон, региональные коэффициенты — всё настраивается комиссией в реальном времени.
-
----
-
-## 🏗 Архитектура системы
-
-```
-Заявка кандидата
-       │
-       ▼
-┌─────────────────────────────────┐
-│  Слой 1: Rule-based Gate        │
-│  ENT ≥ 80 / IELTS ≥ 6.0        │
-│  Региональный коэффициент 0.95–1.15 │
-└────────────┬────────────────────┘
-             │ прошёл
-             ▼
-┌─────────────────────────────────┐
-│  Слой 2: NLP-модели             │
-│  • 3 модели: EN/RU/KZ           │
-│  • 7 качеств (leadership, ...)  │
-│  • AI-детектор (perplexity,     │
-│    burstiness, specificity NER) │
-│  • Consistency Score            │
-│    (письмо ↔ видео)             │
-└────────────┬────────────────────┘
-             │
-             ▼
-┌─────────────────────────────────┐
-│  Слой 3: LLM (Groq / Llama)     │
-│  Генерирует объяснения          │
-│  для комиссии на русском        │
-│  НЕ выставляет баллы            │
-└────────────┬────────────────────┘
-             │
-             ▼
-     Зона A / B / C
+```env
+GROQ_API_KEY=gsk_...          # console.groq.com (бесплатно)
+ANTHROPIC_API_KEY=sk-ant-...  # console.anthropic.com
+HF_TOKEN=hf_...               # huggingface.co/settings/tokens
+JURY_EMAIL=jury@yourdomain.kz
+JURY_PASSWORD=strongpassword
+JWT_SECRET=min-32-chars-secret
+DATABASE_URL=postgresql://user:pass@db:5432/invisionu
 ```
 
-### Формула итогового балла
-
-```
-final_score = (nlp_score × 0.70 + struct_score × 0.30) × regional_coeff
-
-nlp_score   = Σ(quality_i × weight_i)  # 7 качеств с весами
-struct_score = f(ENT_norm, IELTS_norm, completeness) → 0–10
-regional_coeff: Алматы/Астана=0.95 | малые города=1.10–1.12 | сёла=1.15
+```bash
+docker-compose up --build
 ```
 
-### Зоны решений
+Первый запуск: 5–10 минут (загрузка NLP моделей из HuggingFace).
 
-| Зона | Условие | Действие |
-|------|---------|----------|
-| **A** | score ≥ 8.0 AND consistency ≥ 0.75 AND AI < 20% | Рекомендован на финал |
-| **B** | score 6.0–7.9 OR consistency < 0.6 OR AI 20–60% | AI Pre-Interview (15 мин) |
-| **C** | score < 6.0 OR AI > 60% | Soft reject → ревью комиссии |
+| Сервис | URL |
+|--------|-----|
+| Backend | http://localhost:8000 |
+| Swagger | http://localhost:8000/api/docs |
 
----
-
-## 🧠 NLP-модели
-
-| Язык | Базовая модель | Данные дообучения |
-|------|---------------|-------------------|
-| EN | roberta-base | Kaggle essays + silver labeling |
-| RU | DeepPavlov/rubert-base-cased | Синтез Claude ~280 примеров |
-| KZ | bert-base-multilingual-cased | Синтез Claude ~280 примеров |
-
-Обученные `.pkl` файлы хранятся в [HuggingFace Hub](https://huggingface.co/Nooruzbek/invisionu-models) и автоматически скачиваются при старте контейнера.
-
-**Fallback:** если модели недоступны — система использует `paraphrase-multilingual-MiniLM-L12-v2`. Все функции сохраняются, точность немного ниже.
-
----
-
-## 📊 Метрики качества
-
-| Метрика | Достигнуто | Минимум |
-|---------|-----------|---------|
-| AUROC (среднее по 7 качествам) | 0.87 | 0.75 |
-| F1 macro | 0.81 | 0.70 |
-| AI-детектор F1 | 0.84 | 0.75 |
-| Улучшение vs baseline | +18% | +10% |
-
----
-
-## 🔐 Аккаунты для тестирования
-
-| Роль | Email | Пароль |
-|------|-------|--------|
-| Reviewer (комиссия) | `jury@invisionu.kz` | `jury2025!` |
-| Applicant (Айгерим) | `aigerin.dosova@seed.invisionu.kz` | `demo1234` |
-| Applicant (Максат) | `maksat.kenzheev@seed.invisionu.kz` | `demo1234` |
-| Applicant (Дана) | `dana.nurlanova@seed.invisionu.kz` | `demo1234` |
-
----
-
-## 🛠 Технический стек
-
-| Слой | Технология |
-|------|-----------|
-| Frontend | React 18 + Vite 5 + TailwindCSS + shadcn/ui |
-| Backend | Python FastAPI 0.110+ |
-| БД | PostgreSQL 16 |
-| NLP | HuggingFace Transformers + scikit-learn |
-| AI-детектор | spaCy + NLTK (perplexity, burstiness, NER) |
-| Транскрипция | Whisper medium (open source) |
-| LLM | Groq API (llama-3.3-70b) — объяснения |
-| Деплой | Docker Compose / Railway + Vercel |
-
----
-
-## 📁 Структура репозитория
-
-```
-invisionu-screening/
-├── backend/
-│   ├── app/
-│   │   ├── api/routes.py          # все эндпоинты
-│   │   ├── models/scorer.py       # оркестратор 3 слоёв
-│   │   ├── models/nlp_model.py    # NLP scoring
-│   │   ├── models/ai_detector.py  # детектор AI-текстов
-│   │   ├── models/consistency.py  # cosine similarity
-│   │   ├── models/transcriber.py  # Whisper
-│   │   └── models/llm_explainer.py# Claude / Groq API
-│   ├── download_models.py         # авто-загрузка .pkl из HuggingFace
-│   └── requirements.txt
-├── training/
-│   ├── train_models_v3.ipynb      # Google Colab ноутбук
-│   ├── dataset_final.json         # итоговый датасет
-│   └── silver_labeling.py         # авторазметка EN эссе
-├── docker-compose.yml
-└── .env.example
-```
-
----
-
-## 📌 Ключевая цифра
-
-> **965 заявок × 15 мин = 241 час ручной работы → 25 часов с нашей системой. −90%. Стоимость AI за сезон: ~$11.**
+Аккаунт комиссии (`JURY_EMAIL`) создаётся автоматически при первом старте.

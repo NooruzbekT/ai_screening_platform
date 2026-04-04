@@ -62,6 +62,31 @@ async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSON
 @app.on_event("startup")
 def startup() -> None:
     Base.metadata.create_all(bind=engine)
+    _ensure_jury_account()
+    from download_models import download_models
+    download_models()
+    from app.models.nlp_model import nlp_model
+    nlp_model._ensure_ready()
+
+
+def _ensure_jury_account() -> None:
+    from passlib.context import CryptContext
+    from app.db.database import SessionLocal
+    from app.db.models import User, UserRole
+
+    pwd = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__truncate_error=False)
+    db = SessionLocal()
+    try:
+        if not db.query(User).filter(User.email == settings.JURY_EMAIL).first():
+            db.add(User(
+                email=settings.JURY_EMAIL,
+                password_hash=pwd.hash(settings.JURY_PASSWORD),
+                full_name="Приёмная комиссия",
+                role=UserRole.reviewer,
+            ))
+            db.commit()
+    finally:
+        db.close()
 
 
 @app.get("/api/health", tags=["system"])

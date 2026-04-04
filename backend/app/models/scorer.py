@@ -152,6 +152,9 @@ async def score_application(application_id: UUID, db: Session) -> ScoreResult:
             "regional_coeff": regional_coeff,
             "city": app.city,
             "zone": zone,
+            "final_score": final,
+            "struct_score": s_score,
+            "consistency_score": cons_score,
         })
     except Exception as exc:
         log.warning("LLM explainer failed: %s", exc)
@@ -245,10 +248,23 @@ def _save_score(app: Application, layer: ScoreLayer, db: Session, **kwargs) -> S
 
 def _save_rejection(app: Application, reason: str, db: Session) -> None:
     app.status = ApplicationStatus.rejected
+    explanations = {"summary": reason, "zone_explanation": reason}
+    try:
+        explanations = llm_explainer.explain({
+            "scores": {},
+            "ai_detector": {},
+            "zone": "C",
+            "final_score": 0.0,
+            "struct_score": 0.0,
+            "reject_reason": reason,
+        })
+        explanations["summary"] = reason
+    except Exception:
+        pass
     _save_score(
         app, ScoreLayer.rule,
         scores={}, zone="C", final_score=0.0,
-        explanations={"summary": reason},
+        explanations=explanations,
         db=db,
     )
     db.commit()

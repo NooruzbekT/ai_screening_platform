@@ -11,6 +11,24 @@ with open(DATA_DIR / "regional_coeffs.json", encoding="utf-8") as _f:
 _FOREIGN_COUNTRIES: set = set(_REGIONAL.get("foreign_countries", {}).keys())
 
 
+def get_all_regional_coeffs() -> dict:
+    return {
+        "cities": dict(_REGIONAL.get("cities", {})),
+        "tiers": dict(_REGIONAL.get("tiers", {})),
+        "foreign_countries": dict(_REGIONAL.get("foreign_countries", {})),
+        "default": _REGIONAL.get("default", 1.0),
+    }
+
+
+def update_regional_coeffs(updates: dict) -> None:
+    """Update city coefficients at runtime (in-memory only)."""
+    cities = _REGIONAL.setdefault("cities", {})
+    for city, coeff in updates.items():
+        cities[city] = float(coeff)
+    if "default" in updates:
+        _REGIONAL["default"] = float(updates["default"])
+
+
 @dataclass
 class ApplicationInput:
     country: str

@@ -96,34 +96,22 @@ class NLPModel:
         text: str,
         question_ids: Optional[List[str]] = None,
     ) -> Tuple[Dict[str, float], Dict[str, List[str]]]:
-        """Return (quality_scores 0–10, attribution keywords).
-        
-        HACKATHON MOCK: Returns fixed scores to avoid OOM on Railway free tier (512 MB).
-        Real ML models trained but require >= 2 GB RAM.
-        """
+        """Return (quality_scores 0–10, attribution keywords)."""
         self._ensure_ready()
-        
-        # Mock scores: reasonable range 6.5-8.5 to show variety
-        import random
-        random.seed(hash(text[:50]) % 10000)  # Deterministic per text
-        
-        raw_scores = {
-            "leadership": 0.70 + random.random() * 0.15,
-            "motivation": 0.75 + random.random() * 0.15,
-            "perseverance": 0.65 + random.random() * 0.15,
-            "teamwork": 0.68 + random.random() * 0.15,
-            "goal_pursuit": 0.72 + random.random() * 0.12,
-            "intrinsic_motivation": 0.70 + random.random() * 0.12,
-            "prosocial_purpose": 0.67 + random.random() * 0.12,
-        }
-        
+        lang = self._detect_lang(text)
+
+        if lang in self._pkl_models:
+            raw_scores, attribution = self._score_pkl(text, lang)
+        elif self._fallback is not None:
+            kw_lang = lang if lang in self._keywords else "ru"
+            raw_scores, attribution = self._score_fallback(text, kw_lang)
+        else:
+            kw_lang = lang if lang in self._keywords else "ru"
+            raw_scores = {q: 0.5 for q in QUALITIES}
+            attribution = self._keyword_attribution(text, kw_lang)
+
         raw_scores = self._apply_multipliers(raw_scores, question_ids or [])
         scores = {k: round(min(v * 10, 10.0), 2) for k, v in raw_scores.items()}
-        
-        # Mock attribution: extract some keywords from text
-        words = text.split()[:5] if text else []
-        attribution = {q: words for q in QUALITIES}
-        
         return scores, attribution
 
     def compute_nlp_score(self, quality_scores: Dict[str, float]) -> float:
@@ -134,11 +122,11 @@ class NLPModel:
     # ------------------------------------------------------------------
 
     def _ensure_ready(self) -> None:
-        """HACKATHON MOCK: Skip model loading to avoid OOM (Railway 512 MB)."""
         if self._ready:
             return
-        # DISABLED: self._fallback = SentenceTransformer(settings.NLP_FALLBACK_MODEL)
-        # DISABLED: self._precompute_kw_embeddings()
+        self._fallback = SentenceTransformer(settings.NLP_FALLBACK_MODEL)
+        self._load_pkl_models()
+        self._precompute_kw_embeddings()
         self._ready = True
 
     def _load_pkl_models(self) -> None:

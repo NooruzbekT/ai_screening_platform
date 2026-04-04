@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.api.schemas import (
     AIDetectorDetail,
+    AnswerDetail,
     AnswersUpdate,
     ApplicationCreate,
     ApplicationDetail,
@@ -24,6 +25,8 @@ from app.api.schemas import (
     DecisionCreate,
     DecisionResponse,
     DocumentsUpdate,
+    InterviewLogDetail,
+    InterviewMessageDetail,
     InterviewMessageRequest,
     InterviewMessageResponse,
     InterviewStartResponse,
@@ -33,6 +36,7 @@ from app.api.schemas import (
     QuestionUpdate,
     RegisterRequest,
     ScoreDetail,
+    SettingsResponse,
     SettingsUpdate,
     StatsResponse,
     TokenResponse,
@@ -49,15 +53,18 @@ from app.db.models import (
     AuditLog,
     Decision,
     InterviewLog,
+    ProgramType,
     Question,
     Score,
     ScoreLayer,
     User,
     UserRole,
 )
+from app.models import ai_detector as ai_detector_mod
 from app.models import consistency as consistency_mod
 from app.models import llm_explainer
-from app.models.nlp_model import nlp_model
+from app.models.nlp_model import QUALITIES, nlp_model
+from app.models.rule_engine import get_all_regional_coeffs, update_regional_coeffs
 from app.models.scorer import score_application
 
 _MAX_INTERVIEW_QUESTIONS = 4
@@ -388,6 +395,26 @@ async def start_interview(
     if app.status != ApplicationStatus.awaiting_interview:
         raise HTTPException(status_code=400, detail="Application is not in awaiting_interview status")
 
+    # Return existing in-progress session instead of creating duplicate
+    existing_log = next(
+        (l for l in app.interview_logs if l.completed_at is None), None
+    )
+    if existing_log:
+        messages = existing_log.messages or []
+        last_q = next(
+            (m["content"] for m in reversed(messages) if m.get("role") == "assistant"), None
+        )
+        answered = sum(1 for m in messages if m.get("role") == "user")
+        if last_q:
+            audio_url = await llm_explainer.text_to_speech(last_q)
+            return InterviewStartResponse(
+                interview_id=existing_log.id,
+                question=last_q,
+                audio_url=audio_url,
+                question_number=answered + 1,
+                total_questions=_MAX_INTERVIEW_QUESTIONS,
+            )
+
     written_score = _get_layer_score(app, ScoreLayer.nlp_written)
     video_score = _get_layer_score(app, ScoreLayer.nlp_video)
     w_scores = (written_score.scores or {}) if written_score else {}
@@ -460,22 +487,56 @@ async def interview_message(
         interview_text = " ".join(
             m["content"] for m in messages if m.get("role") == "user"
         )
-        interview_scores, _ = nlp_model.score(interview_text)
 
         app: Application = log_entry.application
+
+        # ── 1. NLP score interview answers ──────────────────────────────
+        interview_nlp_scores, attr_interview = nlp_model.score(interview_text)
+        interview_nlp_val = nlp_model.compute_nlp_score(interview_nlp_scores)
+
+        # ── 2. AI detector on interview text ────────────────────────────
+        ai_interview = ai_detector_mod.analyze(interview_text)
+
+        # ── 3. Consistency: written vs interview ─────────────────────────
         written_score = _get_layer_score(app, ScoreLayer.nlp_written)
         w_scores = (written_score.scores or {}) if written_score else {}
+        new_cons = consistency_mod.compute(w_scores, interview_nlp_scores)
 
-        new_cons = consistency_mod.compute(w_scores, interview_scores)
+        # ── 4. Blended final score ───────────────────────────────────────
+        # Pre-interview final (struct + written NLP) counts 70%
+        # Interview NLP contributes 30% — validates, not replaces
         final_score_rec = _get_layer_score(app, ScoreLayer.rule)
         old_final = (final_score_rec.final_score or 0.0) if final_score_rec else 0.0
+        blended_final = round(old_final * 0.70 + interview_nlp_val * 10 * 0.30, 4)
 
-        new_zone = "A" if (
-            old_final >= settings.ZONE_A_THRESHOLD
-            and new_cons >= settings.CONSISTENCY_THRESHOLD
-        ) else "C"
+        # ── 5. Zone decision — pure thresholds, no LLM judgment ─────────
+        zone_a = (
+            blended_final >= settings.ZONE_A_THRESHOLD       # >= 8.0
+            and new_cons >= settings.CONSISTENCY_THRESHOLD   # >= 0.60
+            and ai_interview.composite < 0.20                 # не AI-coached
+        )
+        new_zone = "A" if zone_a else "C"
+
+        # ── 6. Save interview score layer ────────────────────────────────
+        db.add(Score(
+            application_id=app.id,
+            layer=ScoreLayer.interview,
+            scores=interview_nlp_scores,
+            attribution=attr_interview,
+            ai_probability=ai_interview.composite,
+            ai_detector_detail={
+                "perplexity": ai_interview.perplexity,
+                "burstiness": ai_interview.burstiness,
+                "specificity": ai_interview.specificity,
+                "composite": ai_interview.composite,
+            },
+            consistency_score=new_cons,
+            zone=new_zone,
+            final_score=blended_final,
+        ))
+
         log_entry.new_zone = new_zone
-        log_entry.final_score = old_final
+        log_entry.final_score = blended_final
         app.status = ApplicationStatus.zone_a if new_zone == "A" else ApplicationStatus.zone_c
 
         db.add(Answer(
@@ -484,8 +545,15 @@ async def interview_message(
             question_id="interview",
             text=interview_text,
         ))
+        _audit(db, "interview", log_entry.id, f"completed:zone_{new_zone}", app.user_id, {
+            "old_final": old_final,
+            "blended_final": blended_final,
+            "consistency": new_cons,
+            "ai_interview": ai_interview.composite,
+            "zone": new_zone,
+        })
         db.commit()
-        return InterviewMessageResponse(is_complete=True)
+        return InterviewMessageResponse(is_complete=True, new_zone=new_zone)
 
     # Build conversation for Groq (skip system_context storage entry)
     groq_msgs = [
@@ -517,28 +585,64 @@ async def interview_message(
 
 @router.get("/dashboard", response_model=DashboardResponse)
 def dashboard(
+    zone: Optional[str] = Query(default=None, description="A, B or C"),
+    status_filter: Optional[str] = Query(default=None, alias="status"),
+    program: Optional[str] = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
     reviewer: User = Depends(_require_reviewer),
     db: Session = Depends(get_db),
 ):
-    apps = db.query(Application).all()
-    summaries = [_to_summary(a, db) for a in apps]
+    all_apps = db.query(Application).all()
 
+    # Global summary counts (always unfiltered)
     by_program: dict = {}
-    for a in apps:
+    for a in all_apps:
         key = a.program.value
         by_program[key] = by_program.get(key, 0) + 1
 
+    # Build filtered query
+    q = db.query(Application)
+    if program:
+        try:
+            q = q.filter(Application.program == ProgramType(program))
+        except ValueError:
+            pass
+    if status_filter:
+        try:
+            q = q.filter(Application.status == ApplicationStatus(status_filter))
+        except ValueError:
+            pass
+    if zone:
+        zone_status_map = {
+            "A": [ApplicationStatus.zone_a, ApplicationStatus.shortlisted],
+            "B": [ApplicationStatus.zone_b, ApplicationStatus.awaiting_interview],
+            "C": [ApplicationStatus.zone_c, ApplicationStatus.rejected],
+        }
+        statuses = zone_status_map.get(zone.upper(), [])
+        if statuses:
+            q = q.filter(Application.status.in_(statuses))
+
+    total_filtered = q.count()
+    filtered_apps = q.order_by(Application.created_at.desc())\
+                     .offset((page - 1) * page_size)\
+                     .limit(page_size)\
+                     .all()
+
     return DashboardResponse(
-        total=len(apps),
-        zone_a=sum(1 for a in apps if a.status == ApplicationStatus.zone_a),
-        zone_b=sum(1 for a in apps if a.status in (
+        total=len(all_apps),
+        total_filtered=total_filtered,
+        zone_a=sum(1 for a in all_apps if a.status == ApplicationStatus.zone_a),
+        zone_b=sum(1 for a in all_apps if a.status in (
             ApplicationStatus.zone_b, ApplicationStatus.awaiting_interview)),
-        zone_c=sum(1 for a in apps if a.status == ApplicationStatus.zone_c),
-        pending_review=sum(1 for a in apps if a.status in (
+        zone_c=sum(1 for a in all_apps if a.status == ApplicationStatus.zone_c),
+        pending_review=sum(1 for a in all_apps if a.status in (
             ApplicationStatus.zone_a, ApplicationStatus.zone_b,
             ApplicationStatus.awaiting_interview)),
         by_program=by_program,
-        applications=summaries,
+        applications=[_to_summary(a, db) for a in filtered_apps],
+        page=page,
+        page_size=page_size,
     )
 
 
@@ -571,6 +675,37 @@ def application_detail(
         for s in app.scores
     ]
 
+    answers = [
+        AnswerDetail(
+            question_id=a.question_id,
+            source=a.source.value,
+            text=a.text,
+            video_url=a.video_url,
+            transcript=a.transcript,
+        )
+        for a in sorted(app.answers, key=lambda x: x.question_id)
+    ]
+
+    # Interview log — last completed session (or last in-progress)
+    interview_log = None
+    if app.interview_logs:
+        log = next(
+            (l for l in app.interview_logs if l.completed_at),
+            app.interview_logs[-1],
+        )
+        visible_messages = [
+            InterviewMessageDetail(role=m["role"], content=m["content"])
+            for m in (log.messages or [])
+            if m.get("role") in ("assistant", "user")
+        ]
+        interview_log = InterviewLogDetail(
+            interview_id=log.id,
+            messages=visible_messages,
+            final_score=log.final_score,
+            new_zone=log.new_zone,
+            completed_at=log.completed_at,
+        )
+
     return ApplicationDetail(
         id=app.id,
         status=app.status,
@@ -580,7 +715,9 @@ def application_detail(
         regional_coeff=app.regional_coeff,
         full_name=app.user.full_name,
         documents=app.documents,
+        answers=answers,
         scores=scores,
+        interview_log=interview_log,
         created_at=app.created_at,
     )
 
@@ -620,6 +757,29 @@ def make_decision(
     return decision
 
 
+@router.post("/applications/{app_id}/rescore", response_model=ApplicationStatusResponse)
+async def rescore_application(
+    app_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
+    reviewer: User = Depends(_require_reviewer),
+    db: Session = Depends(get_db),
+):
+    app = db.get(Application, app_id)
+    if app is None:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    for score in list(app.scores):
+        db.delete(score)
+
+    app.status = ApplicationStatus.submitted
+    _audit(db, "application", app_id, "rescore_triggered", reviewer.id)
+    db.commit()
+
+    background_tasks.add_task(_run_scoring, app_id)
+    db.refresh(app)
+    return app
+
+
 @router.get("/stats", response_model=StatsResponse)
 def stats(
     reviewer: User = Depends(_require_reviewer),
@@ -656,12 +816,25 @@ def stats(
     )
 
 
-@router.put("/settings")
+@router.get("/settings", response_model=SettingsResponse)
+def get_settings(reviewer: User = Depends(_require_reviewer)):
+    return SettingsResponse(
+        zone_a_threshold=settings.ZONE_A_THRESHOLD,
+        zone_b_threshold=settings.ZONE_B_THRESHOLD,
+        ai_detector_threshold=settings.AI_DETECTOR_THRESHOLD,
+        consistency_threshold=settings.CONSISTENCY_THRESHOLD,
+        nlp_weight=settings.NLP_WEIGHT,
+        struct_weight=settings.STRUCT_WEIGHT,
+        regional_coeffs=get_all_regional_coeffs(),
+    )
+
+
+@router.put("/settings", response_model=SettingsResponse)
 def update_settings(
     body: SettingsUpdate,
     reviewer: User = Depends(_require_reviewer),
+    db: Session = Depends(get_db),
 ):
-    # Runtime-only override; persisted via env in production
     if body.zone_a_threshold is not None:
         settings.ZONE_A_THRESHOLD = body.zone_a_threshold
     if body.zone_b_threshold is not None:
@@ -674,7 +847,12 @@ def update_settings(
         settings.NLP_WEIGHT = body.nlp_weight
     if body.struct_weight is not None:
         settings.STRUCT_WEIGHT = body.struct_weight
-    return {"ok": True}
+    if body.regional_coeffs:
+        update_regional_coeffs(body.regional_coeffs)
+    _audit(db, "settings", None, "updated", reviewer.id,
+           body.model_dump(exclude_none=True))
+    db.commit()
+    return get_settings(reviewer)
 
 
 # ---------------------------------------------------------------------------
@@ -699,7 +877,7 @@ def seed(
         else:
             applicant = User(
                 email=email,
-                password_hash=_hash_password("demo1234"),
+                password_hash=_hash_password(settings.JURY_PASSWORD),
                 full_name=archetype["full_name"],
                 role=UserRole.applicant,
             )
