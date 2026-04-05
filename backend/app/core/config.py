@@ -32,9 +32,9 @@ class Settings(BaseSettings):
 
     WHISPER_MODEL: str = "medium"
 
-    TTS_VOICE_RU: str = "ru-RU-SvetlanaNeural"
+    TTS_VOICE_RU: str = "ru-RU-DariyaNeural"
     TTS_VOICE_KZ: str = "kk-KZ-AigulNeural"
-    TTS_VOICE_EN: str = "en-US-JennyNeural"
+    TTS_VOICE_EN: str = "en-US-AriaNeural"
     AUDIO_CACHE_DIR: str = "audio_cache"
 
     CLOUDINARY_CLOUD_NAME: str = ""
