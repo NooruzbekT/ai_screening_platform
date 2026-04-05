@@ -37,6 +37,10 @@ class Settings(BaseSettings):
     TTS_VOICE_EN: str = "en-US-JennyNeural"
     AUDIO_CACHE_DIR: str = "audio_cache"
 
+    CLOUDINARY_CLOUD_NAME: str = ""
+    CLOUDINARY_API_KEY: str = ""
+    CLOUDINARY_API_SECRET: str = ""
+
     ZONE_A_THRESHOLD: float = 8.0
     ZONE_B_THRESHOLD: float = 6.0
     AI_DETECTOR_THRESHOLD: float = 0.60

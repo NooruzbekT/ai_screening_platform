@@ -344,7 +344,7 @@ def build_interview_system_context(
 # ---------------------------------------------------------------------------
 
 async def text_to_speech(text: str, language: str = "ru") -> Optional[str]:
-    """Generate mp3, save to AUDIO_CACHE_DIR, return relative URL path."""
+    """Generate mp3, upload to Cloudinary (if configured) or local cache, return URL."""
     try:
         import edge_tts
 
@@ -360,6 +360,28 @@ async def text_to_speech(text: str, language: str = "ru") -> Optional[str]:
         os.makedirs(settings.AUDIO_CACHE_DIR, exist_ok=True)
         communicate = edge_tts.Communicate(text, voice)
         await communicate.save(output_path)
+
+        if settings.CLOUDINARY_CLOUD_NAME:
+            import cloudinary
+            import cloudinary.uploader
+            cloudinary.config(
+                cloud_name=settings.CLOUDINARY_CLOUD_NAME,
+                api_key=settings.CLOUDINARY_API_KEY,
+                api_secret=settings.CLOUDINARY_API_SECRET,
+            )
+            with open(output_path, "rb") as f:
+                result = cloudinary.uploader.upload(
+                    f.read(),
+                    public_id=filename.replace(".mp3", ""),
+                    folder="invisionu/interview_audio",
+                    resource_type="auto",
+                    overwrite=False,
+                )
+            try:
+                os.remove(output_path)
+            except OSError:
+                pass
+            return result["secure_url"]
 
         return f"/audio/{filename}"
     except Exception:

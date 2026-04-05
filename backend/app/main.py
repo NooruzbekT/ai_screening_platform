@@ -102,3 +102,8 @@ app.include_router(router, prefix="/api")
 audio_dir = Path(settings.AUDIO_CACHE_DIR)
 audio_dir.mkdir(exist_ok=True)
 app.mount("/audio", StaticFiles(directory=str(audio_dir)), name="audio")
+
+# Serve uploaded language certificates
+uploads_dir = Path("uploads/language_certs")
+uploads_dir.mkdir(parents=True, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")

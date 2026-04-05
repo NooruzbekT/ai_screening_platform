@@ -58,6 +58,16 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class UserProfile(BaseModel):
+    id: UUID
+    email: str
+    full_name: str
+    role: UserRoleEnum
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
@@ -83,6 +93,45 @@ class DocumentsUpdate(BaseModel):
     gpa: Optional[float] = Field(default=None, ge=0.0, le=10.0)
     graduation_year: Optional[int] = None
     school_name: Optional[str] = None
+
+
+class ProfileUpdate(BaseModel):
+    full_name: Optional[str] = Field(default=None, min_length=2)
+    country: Optional[str] = Field(default=None, min_length=2, max_length=2)
+    city: Optional[str] = None
+    school_name: Optional[str] = None
+    ent_score: Optional[int] = Field(default=None, ge=0, le=140)
+    graduation_year: Optional[int] = None
+    gpa: Optional[float] = Field(default=None, ge=0.0, le=10.0)
+
+
+class LanguageCertType(str, enum.Enum):
+    ielts = "IELTS"
+    toefl = "TOEFL"
+    duolingo = "Duolingo"
+
+
+class DocType(str, enum.Enum):
+    ent_cert = "ent_cert"
+    language_cert = "language_cert"
+    recommendation = "recommendation"
+
+
+class DocumentUploadResponse(BaseModel):
+    doc_url: str
+    doc_type: DocType
+    cert_type: Optional[LanguageCertType] = None
+    score: Optional[float] = None
+
+
+class VideoUploadResponse(BaseModel):
+    video_url: str
+    question_id: str
+
+
+# kept for backwards compat
+class LanguageCertUploadResponse(DocumentUploadResponse):
+    pass
 
 
 class AnswerItem(BaseModel):
@@ -147,6 +196,7 @@ class AnswerDetail(BaseModel):
 class InterviewMessageDetail(BaseModel):
     role: str    # "assistant" | "user"
     content: str
+    audio_url: Optional[str] = None
 
 
 class InterviewLogDetail(BaseModel):
@@ -285,6 +335,22 @@ class DecisionResponse(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class DecisionHistoryItem(BaseModel):
+    id: UUID
+    decision: DecisionEnum
+    agreed_with_ai: Optional[bool]
+    override_reason: Optional[str]
+    notes: Optional[str]
+    reviewer_name: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class StatusPatch(BaseModel):
+    status: ApplicationStatusEnum
 
 
 # ---------------------------------------------------------------------------

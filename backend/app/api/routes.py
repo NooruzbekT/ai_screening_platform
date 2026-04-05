@@ -6,7 +6,9 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
+from pathlib import Path
+
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -30,7 +32,15 @@ from app.api.schemas import (
     InterviewMessageRequest,
     InterviewMessageResponse,
     InterviewStartResponse,
+    DecisionHistoryItem,
+    DocType,
+    DocumentUploadResponse,
+    LanguageCertType,
+    LanguageCertUploadResponse,
     LoginRequest,
+    ProfileUpdate,
+    StatusPatch,
+    UserProfile,
     QuestionCreate,
     QuestionResponse,
     QuestionUpdate,
@@ -42,6 +52,7 @@ from app.api.schemas import (
     TokenResponse,
     VideoQuestionsResponse,
     VideoUpdate,
+    VideoUploadResponse,
 )
 from app.core.config import settings
 from app.db.database import get_db
@@ -166,8 +177,30 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
 
 
 # ---------------------------------------------------------------------------
+# User profile
+# ---------------------------------------------------------------------------
+
+@router.get("/me", response_model=UserProfile)
+def get_me(user: User = Depends(_current_user)):
+    return user
+
+
+# ---------------------------------------------------------------------------
 # Applications — applicant side
 # ---------------------------------------------------------------------------
+
+@router.get("/applications/mine", response_model=List[ApplicationStatusResponse])
+def get_my_applications(
+    user: User = Depends(_current_user),
+    db: Session = Depends(get_db),
+):
+    return (
+        db.query(Application)
+        .filter(Application.user_id == user.id)
+        .order_by(Application.created_at.desc())
+        .all()
+    )
+
 
 @router.post("/applications", response_model=ApplicationStatusResponse, status_code=201)
 def create_application(
@@ -203,6 +236,114 @@ def update_documents(
     return app
 
 
+@router.put("/applications/{app_id}/profile", response_model=ApplicationStatusResponse)
+def update_profile(
+    app_id: uuid.UUID,
+    body: ProfileUpdate,
+    user: User = Depends(_current_user),
+    db: Session = Depends(get_db),
+):
+    app = _get_own_application(app_id, user, db)
+    if body.full_name is not None:
+        user.full_name = body.full_name
+    if body.country is not None:
+        app.country = body.country.upper()
+    if body.city is not None:
+        app.city = body.city
+    doc_fields = body.model_dump(include={"school_name", "ent_score", "graduation_year", "gpa"}, exclude_none=True)
+    if doc_fields:
+        current_docs = app.documents or {}
+        app.documents = {**current_docs, **doc_fields}
+    db.commit()
+    db.refresh(app)
+    _audit(db, "application", app.id, "profile_updated", user.id, body.model_dump(exclude_none=True))
+    db.commit()
+    return app
+
+
+_ALLOWED_MIME = {"application/pdf", "image/jpeg", "image/png"}
+_MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
+_LANG_SCORE_KEY = {"IELTS": "ielts_score", "TOEFL": "toefl_score", "Duolingo": "duolingo_score"}
+
+
+def _cloudinary_upload(contents: bytes, filename: str, folder: str) -> str:
+    import cloudinary
+    import cloudinary.uploader
+
+    cloudinary.config(
+        cloud_name=settings.CLOUDINARY_CLOUD_NAME,
+        api_key=settings.CLOUDINARY_API_KEY,
+        api_secret=settings.CLOUDINARY_API_SECRET,
+    )
+    try:
+        result = cloudinary.uploader.upload(
+            contents,
+            public_id=Path(filename).stem,
+            folder=f"invisionu/{folder}",
+            resource_type="auto",
+            overwrite=False,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"File upload failed: {e}")
+    return result["secure_url"]
+
+
+def _local_fallback_upload(contents: bytes, folder: str, filename: str) -> str:
+    dest = Path("uploads") / folder
+    dest.mkdir(parents=True, exist_ok=True)
+    with open(dest / filename, "wb") as f:
+        f.write(contents)
+    return f"/uploads/{folder}/{filename}"
+
+
+@router.post("/applications/{app_id}/documents/upload", response_model=DocumentUploadResponse)
+async def upload_document(
+    app_id: uuid.UUID,
+    doc_type: DocType,
+    file: UploadFile = File(...),
+    cert_type: Optional[LanguageCertType] = None,
+    score: Optional[float] = None,
+    user: User = Depends(_current_user),
+    db: Session = Depends(get_db),
+):
+    app = _get_own_application(app_id, user, db)
+
+    if file.content_type not in _ALLOWED_MIME:
+        raise HTTPException(status_code=400, detail="Only PDF, JPEG, PNG files are accepted")
+
+    contents = await file.read()
+    if len(contents) > _MAX_FILE_SIZE:
+        raise HTTPException(status_code=400, detail="File size must not exceed 10 MB")
+
+    ext = Path(file.filename).suffix if file.filename else ".pdf"
+    filename = f"{app_id}_{uuid.uuid4().hex}{ext}"
+    folder = doc_type.value + "s"  # ent_certs, language_certs, recommendations
+
+    if settings.CLOUDINARY_CLOUD_NAME:
+        doc_url = _cloudinary_upload(contents, filename, folder)
+    else:
+        doc_url = _local_fallback_upload(contents, folder, filename)
+
+    current_docs = app.documents or {}
+    update: dict = {f"{doc_type.value}_url": doc_url}
+
+    if doc_type == DocType.language_cert:
+        if cert_type is not None:
+            update["language_cert_type"] = cert_type.value
+        if score is not None and cert_type is not None:
+            update[_LANG_SCORE_KEY.get(cert_type.value, "lang_score")] = score
+    elif doc_type == DocType.ent_cert and score is not None:
+        update["ent_score"] = int(score)
+
+    app.documents = {**current_docs, **update}
+    db.commit()
+    _audit(db, "application", app.id, "document_uploaded", user.id,
+           {"doc_type": doc_type.value, "cert_type": cert_type, "score": score})
+    db.commit()
+
+    return DocumentUploadResponse(doc_url=doc_url, doc_type=doc_type, cert_type=cert_type, score=score)
+
+
 @router.put("/applications/{app_id}/answers", response_model=ApplicationStatusResponse)
 def update_answers(
     app_id: uuid.UUID,
@@ -230,6 +371,76 @@ def update_answers(
     db.commit()
     db.refresh(app)
     return app
+
+
+_VIDEO_MIME = {"video/mp4", "video/webm", "video/quicktime", "video/x-msvideo"}
+_MAX_VIDEO_SIZE = 200 * 1024 * 1024  # 200 MB
+
+
+@router.post("/applications/{app_id}/video/upload", response_model=VideoUploadResponse)
+async def upload_video(
+    app_id: uuid.UUID,
+    question_id: str,
+    file: UploadFile = File(...),
+    user: User = Depends(_current_user),
+    db: Session = Depends(get_db),
+):
+    app = _get_own_application(app_id, user, db)
+
+    if file.content_type not in _VIDEO_MIME:
+        raise HTTPException(status_code=400, detail="Only MP4, WebM, MOV, AVI files are accepted")
+
+    contents = await file.read()
+    if len(contents) > _MAX_VIDEO_SIZE:
+        raise HTTPException(status_code=400, detail="Video must not exceed 200 MB")
+
+    ext = Path(file.filename).suffix if file.filename else ".mp4"
+    filename = f"{app_id}_{question_id}_{uuid.uuid4().hex}{ext}"
+
+    if settings.CLOUDINARY_CLOUD_NAME:
+        import cloudinary
+        import cloudinary.uploader
+        cloudinary.config(
+            cloud_name=settings.CLOUDINARY_CLOUD_NAME,
+            api_key=settings.CLOUDINARY_API_KEY,
+            api_secret=settings.CLOUDINARY_API_SECRET,
+        )
+        result = cloudinary.uploader.upload(
+            contents,
+            public_id=Path(filename).stem,
+            folder="invisionu/videos",
+            resource_type="video",
+            overwrite=False,
+        )
+        video_url = result["secure_url"]
+    else:
+        dest = Path("uploads/videos")
+        dest.mkdir(parents=True, exist_ok=True)
+        with open(dest / filename, "wb") as f:
+            f.write(contents)
+        video_url = f"/uploads/videos/{filename}"
+
+    existing = (
+        db.query(Answer)
+        .filter(Answer.application_id == app_id, Answer.question_id == question_id,
+                Answer.source == AnswerSource.video)
+        .first()
+    )
+    if existing:
+        existing.video_url = video_url
+        existing.transcript = None
+    else:
+        db.add(Answer(
+            application_id=app_id,
+            source=AnswerSource.video,
+            question_id=question_id,
+            video_url=video_url,
+        ))
+    db.commit()
+    _audit(db, "application", app.id, "video_uploaded", user.id, {"question_id": question_id})
+    db.commit()
+
+    return VideoUploadResponse(video_url=video_url, question_id=question_id)
 
 
 @router.put("/applications/{app_id}/video", response_model=ApplicationStatusResponse)
@@ -289,6 +500,20 @@ def get_status(
     db: Session = Depends(get_db),
 ):
     return _get_own_application(app_id, user, db)
+
+
+@router.delete("/applications/{app_id}", status_code=204)
+def delete_application(
+    app_id: uuid.UUID,
+    user: User = Depends(_current_user),
+    db: Session = Depends(get_db),
+):
+    app = _get_own_application(app_id, user, db)
+    if app.status != ApplicationStatus.draft:
+        raise HTTPException(status_code=400, detail="Only draft applications can be deleted")
+    _audit(db, "application", app_id, "deleted", user.id)
+    db.delete(app)
+    db.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -438,18 +663,18 @@ async def start_interview(
     if not first_q:
         first_q = "Расскажите о конкретном случае, который повлиял на ваш выбор этой программы."
 
+    audio_url = await llm_explainer.text_to_speech(first_q)
     log_entry = InterviewLog(
         application_id=app_id,
         messages=[
             {"role": "system_context", "content": system_context},
-            {"role": "assistant", "content": first_q},
+            {"role": "assistant", "content": first_q, "audio_url": audio_url},
         ],
     )
     db.add(log_entry)
     db.commit()
     db.refresh(log_entry)
 
-    audio_url = await llm_explainer.text_to_speech(first_q)
     return InterviewStartResponse(
         interview_id=log_entry.id,
         question=first_q,
@@ -566,11 +791,11 @@ async def interview_message(
     if is_complete or not next_q:
         return InterviewMessageResponse(is_complete=True)
 
-    messages.append({"role": "assistant", "content": next_q})
+    audio_url = await llm_explainer.text_to_speech(next_q)
+    messages.append({"role": "assistant", "content": next_q, "audio_url": audio_url})
     log_entry.messages = messages
     db.commit()
 
-    audio_url = await llm_explainer.text_to_speech(next_q)
     return InterviewMessageResponse(
         next_question=next_q,
         audio_url=audio_url,
@@ -694,7 +919,11 @@ def application_detail(
             app.interview_logs[-1],
         )
         visible_messages = [
-            InterviewMessageDetail(role=m["role"], content=m["content"])
+            InterviewMessageDetail(
+                role=m["role"],
+                content=m["content"],
+                audio_url=m.get("audio_url"),
+            )
             for m in (log.messages or [])
             if m.get("role") in ("assistant", "user")
         ]
@@ -755,6 +984,54 @@ def make_decision(
     db.commit()
     db.refresh(decision)
     return decision
+
+
+@router.get("/applications/{app_id}/decisions", response_model=List[DecisionHistoryItem])
+def get_decisions(
+    app_id: uuid.UUID,
+    reviewer: User = Depends(_require_reviewer),
+    db: Session = Depends(get_db),
+):
+    app = db.get(Application, app_id)
+    if app is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    decisions = (
+        db.query(Decision)
+        .filter(Decision.application_id == app_id)
+        .order_by(Decision.created_at.desc())
+        .all()
+    )
+    return [
+        DecisionHistoryItem(
+            id=d.id,
+            decision=d.decision,
+            agreed_with_ai=d.agreed_with_ai,
+            override_reason=d.override_reason,
+            notes=d.notes,
+            reviewer_name=d.reviewer.full_name,
+            created_at=d.created_at,
+        )
+        for d in decisions
+    ]
+
+
+@router.patch("/applications/{app_id}/status", response_model=ApplicationStatusResponse)
+def patch_status(
+    app_id: uuid.UUID,
+    body: StatusPatch,
+    reviewer: User = Depends(_require_reviewer),
+    db: Session = Depends(get_db),
+):
+    app = db.get(Application, app_id)
+    if app is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    old_status = app.status.value
+    app.status = ApplicationStatus(body.status.value)
+    _audit(db, "application", app_id, "status_patched", reviewer.id,
+           {"from": old_status, "to": body.status.value})
+    db.commit()
+    db.refresh(app)
+    return app
 
 
 @router.post("/applications/{app_id}/rescore", response_model=ApplicationStatusResponse)
