@@ -35,7 +35,7 @@ httpcore==1.0.9
 httptools==0.7.1
 httpx==0.28.1
 huggingface_hub==1.8.0
-idna==3.11
+idna==3.15
 Jinja2==3.1.6
 joblib==1.5.3
 langdetect==1.0.9
