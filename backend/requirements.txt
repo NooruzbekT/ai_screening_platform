@@ -67,7 +67,7 @@ pymorphy3-dicts-ru==2.4.417150.4580142
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.2
 python-jose==3.5.0
-python-multipart==0.0.22
+python-multipart==0.0.31
 PyYAML==6.0.3
 regex==2026.3.32
 requests==2.33.0
