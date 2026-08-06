@@ -55,7 +55,7 @@ passlib==1.7.4
 preshed==3.0.13
 propcache==0.4.1
 psycopg2-binary==2.9.11
-pyasn1==0.6.3
+pyasn1==0.6.4
 pycparser==3.0
 pydantic==2.12.5
 email-validator==2.2.0
