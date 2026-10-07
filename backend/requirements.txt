@@ -77,7 +77,7 @@ ru_core_news_sm @ https://github.com/explosion/spacy-models/releases/download/ru
 safetensors==0.7.0
 scikit-learn==1.8.0
 scipy==1.17.1
-sentence-transformers==5.3.0
+sentence-transformers==5.6.0
 setuptools==81.0.0
 shellingham==1.5.4
 six==1.17.0
