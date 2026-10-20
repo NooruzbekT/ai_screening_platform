@@ -26,7 +26,7 @@ edge-tts==7.2.8
 fastapi==0.135.2
 filelock==3.25.2
 frozenlist==1.8.0
-fsspec==2026.3.0
+fsspec==2026.6.0
 greenlet==3.3.2
 groq==1.1.2
 h11==0.16.0
